@@ -1,4 +1,4 @@
-# flutter-ssl-pinning
+# universal-flutter-ssl-pinning
 
 Reverse-engineers `libflutter.so` with PyGhidra to locate the SSL certificate verification function, then emits ready-to-use bypass scripts for both **Frida** and **Renef**.
 
