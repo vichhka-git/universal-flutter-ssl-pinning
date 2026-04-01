@@ -72,3 +72,13 @@ See the [`example/`](example/) directory for sample generated output.
 
 This tool is intended for **authorised security research and penetration testing only**.  
 Do not use against apps you do not own or have explicit written permission to test.
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=vichhka-git%2Funiversal-flutter-ssl-pinning&type=date&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=vichhka-git/universal-flutter-ssl-pinning&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=vichhka-git/universal-flutter-ssl-pinning&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=vichhka-git/universal-flutter-ssl-pinning&type=date&legend=bottom-right" />
+ </picture>
+</a>
