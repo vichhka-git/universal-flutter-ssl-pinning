@@ -60,7 +60,7 @@ See the [`example/`](example/) directory for sample generated output.
 | Google Flutter `libflutter.so` (arm64-v8a) | ✅ Working |
 | Shorebird-patched Flutter builds | ✅ Working |
 | Ghidra 12.x + pyghidra | ✅ Working |
-| Frida 16.x | ✅ Working |
+| Frida 17.x and 16.x | ✅ Working |
 | Renef (latest) | ✅ Working |
 
 > Both Google Flutter and Shorebird use the same `libflutter.so` SSL engine.
@@ -73,7 +73,6 @@ See the [`example/`](example/) directory for sample generated output.
 This tool is intended for **authorised security research and penetration testing only**.  
 Do not use against apps you do not own or have explicit written permission to test.
 
-## Star History
 
 <a href="https://www.star-history.com/?repos=vichhka-git%2Funiversal-flutter-ssl-pinning&type=date&legend=bottom-right">
  <picture>
