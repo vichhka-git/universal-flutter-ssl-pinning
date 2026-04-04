@@ -196,17 +196,77 @@ def generate_js(candidates: list[dict], module_name: str) -> str:
         )
     lines.append("];")
     candidates_block = "\n".join(lines)
-
     return f'''"use strict";
-
 var TARGET_MODULE = "{module_name}";
-
 {candidates_block}
+
+var IS_FRIDA_17 = typeof Module.getGlobalExportByName === "function";
+
+function _findModuleExport(libName, symName) {{
+    try {{
+        if (IS_FRIDA_17) {{
+            var m = Process.findModuleByName(libName);
+            return m ? m.findExportByName(symName) : null;
+        }}
+        return Module.findExportByName(libName, symName);
+    }} catch (_) {{ return null; }}
+}}
+
+function _findGlobalExport(symName) {{
+    try {{
+        if (IS_FRIDA_17) {{
+            return Module.getGlobalExportByName(symName);
+        }}
+        return Module.findExportByName(null, symName);
+    }} catch (_) {{ return null; }}
+}}
+
+function _findExportInModule(moduleObj, symName) {{
+    try {{
+        if (IS_FRIDA_17) {{
+            return moduleObj.findExportByName(symName);
+        }}
+        return Module.findExportByName(moduleObj.name, symName);
+    }} catch (_) {{ return null; }}
+}}
+
+function _resolveDlopen() {{
+    var libNames    = ["libdl.so", "libdl-android.so"];
+    var symNames    = ["android_dlopen_ext", "dlopen"];
+    var linkerNames = ["linker64", "linker"];
+    var linkerSyms  = ["android_dlopen_ext", "__loader_android_dlopen_ext", "dlopen"];
+
+    for (var li = 0; li < libNames.length; li++)
+        for (var si = 0; si < symNames.length; si++) {{
+            var ep = _findModuleExport(libNames[li], symNames[si]);
+            if (ep) return ep;
+        }}
+
+    for (var li2 = 0; li2 < linkerNames.length; li2++)
+        for (var si2 = 0; si2 < linkerSyms.length; si2++) {{
+            var ep2 = _findModuleExport(linkerNames[li2], linkerSyms[si2]);
+            if (ep2) return ep2;
+        }}
+
+    for (var si3 = 0; si3 < symNames.length; si3++) {{
+        var ep3 = _findGlobalExport(symNames[si3]);
+        if (ep3) return ep3;
+    }}
+
+    var found = null;
+    Process.enumerateModules().forEach(function (m) {{
+        if (found) return;
+        for (var si4 = 0; si4 < symNames.length; si4++) {{
+            var ep4 = _findExportInModule(m, symNames[si4]);
+            if (ep4) {{ found = ep4; break; }}
+        }}
+    }});
+    return found;
+}}
 
 function hookCandidate(mod, candidate) {{
     var addr = mod.base.add(candidate.rva);
     if (addr.compare(mod.base.add(mod.size)) >= 0) {{
-        console.log("[-] " + candidate.name + ": RVA " + candidate.rva + " outside module bounds");
         return;
     }}
     try {{
@@ -215,53 +275,41 @@ function hookCandidate(mod, candidate) {{
                 retval.replace(ptr(1));
             }}
         }});
-        console.log("[+] Hooked " + candidate.name + " @ " + addr);
-    }} catch (e) {{
-        console.log("[-] Failed to hook " + candidate.name + ": " + e.message);
-    }}
+    }} catch (e) {{ }}
 }}
 
 function bypassSslPinning(mod) {{
-    console.log("[*] SSL pinning bypass starting (" + HOOK_CANDIDATES.length + " candidate(s))");
-    console.log("[+] " + TARGET_MODULE + " found at: " + mod.base + " size: " + mod.size);
     HOOK_CANDIDATES.forEach(function (c) {{ hookCandidate(mod, c); }});
-    console.log("[+] Done.");
+    console.log("[+] SSL pinning bypassed on " + mod.name + " @ " + mod.base);
 }}
 
-// Check if already loaded (in case we attach late)
 var mod = Process.findModuleByName(TARGET_MODULE);
 if (mod) {{
-    console.log("[*] " + TARGET_MODULE + " already loaded, hooking now...");
     bypassSslPinning(mod);
 }} else {{
-    console.log("[*] " + TARGET_MODULE + " not yet loaded, waiting for it...");
-
-    var listener = Interceptor.attach(Module.findExportByName(null, "android_dlopen_ext") || Module.findExportByName(null, "dlopen"), {{
-        onEnter: function (args) {{
-            var path = args[0].readCString();
-            if (path && path.indexOf("{module_name}") !== -1) {{
-                console.log("[*] Detected load: " + path);
-                this.isTarget = true;
-            }}
-        }},
-        onLeave: function (retval) {{
-            if (this.isTarget) {{
+    var dlopenPtr = _resolveDlopen();
+    if (dlopenPtr) {{
+        var listener = Interceptor.attach(dlopenPtr, {{
+            onEnter: function (args) {{
+                this.isTarget = false;
+                if (args[0].isNull()) return;
+                var path = args[0].readCString();
+                if (path && path.indexOf("{module_name}") !== -1) {{
+                    this.isTarget = true;
+                }}
+            }},
+            onLeave: function (retval) {{
+                if (!this.isTarget) return;
                 var loadedMod = Process.findModuleByName(TARGET_MODULE);
                 if (loadedMod) {{
                     bypassSslPinning(loadedMod);
                     listener.detach();
-                    console.log("[*] Listener detached.");
-                }} else {{
-                    console.log("[-] dlopen returned but module not found yet");
                 }}
             }}
-        }}
-    }});
-
-    console.log("[*] Listening on dlopen/android_dlopen_ext...");
+        }});
+    }}
 }}
 '''
-
 
 def generate_lua(candidates: list[dict], module_name: str) -> str:
     lines = ["local HOOK_CANDIDATES = {"]
