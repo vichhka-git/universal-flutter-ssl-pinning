@@ -365,7 +365,7 @@ def main() -> int:
         sys.exit(f"[!] Binary not found: {binary_path_obj}")
 
     binary_path = str(binary_path_obj)
-    project_dir = str(Path(".ghidra_projects").resolve())
+    project_dir = str(Path("ghidra_projects").resolve())
     os.makedirs(project_dir, exist_ok=True)
 
     import pyghidra
