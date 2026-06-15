@@ -68,10 +68,33 @@ See the [`example/`](example/) directory for sample generated output.
 
 ---
 
+## Quick Traffic Capture (no proxy)
+
+Besides bypassing pinning for a proxy-based MITM, you can capture decrypted HTTP
+traffic **directly in Frida** with the self-contained `flutter_http_monitor.py`.
+It auto-locates BoringSSL `SSL_write`/`SSL_read` in `libflutter.so` (any Flutter
+version, arm64) and generates a Frida script that prints plaintext requests and
+responses — reassembled, de-chunked, gunzipped, and JSON pretty-printed.
+
+```bash
+pip install capstone pyelftools
+
+# scan the binary and generate the monitor (or pass an .apk)
+python3 flutter_http_monitor.py path/to/libflutter.so -o monitor.js
+
+# run it against the app
+frida -U -f com.target.app -l monitor.js
+```
+
+Optional, live in the Frida REPL: `addScope('api.example.com')` to watch only
+specific hosts (Burp-style scope). Single file — nothing else to ship.
+
+
 ## Disclaimer
 
 This tool is intended for **authorised security research and penetration testing only**.  
 Do not use against apps you do not own or have explicit written permission to test.
+
 
 
 <a href="https://www.star-history.com/?repos=vichhka-git%2Funiversal-flutter-ssl-pinning&type=date&legend=bottom-right">
