@@ -3,15 +3,22 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
+import json
 import os
+import platform
 import re
 import shutil
 import sys
+import tempfile
+import threading
 import time
+import traceback
 import warnings
 from dataclasses import dataclass, asdict
+from importlib import metadata
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 
 def _safe_str(value: object) -> str:
@@ -108,6 +115,23 @@ def _analyze_program(flat_api, keyword: str) -> dict:
     function_manager = program.getFunctionManager()
     reference_manager = program.getReferenceManager()
 
+    diagnostics = {
+        "language": _safe_str(program.getLanguageID()),
+        "compiler": _safe_str(program.getCompilerSpec().getCompilerSpecID()),
+        "image_base": _safe_str(program.getImageBase()),
+        "function_count": int(function_manager.getFunctionCount()),
+        "defined_strings": 0,
+        "keyword_string_matches": 0,
+        "references_to_keyword_strings": 0,
+        "references_outside_functions": 0,
+    }
+
+    try:
+        from ghidra.framework import Application
+        diagnostics["ghidra_version"] = _safe_str(Application.getApplicationVersion())
+    except Exception:
+        diagnostics["ghidra_version"] = "unknown"
+
     from ghidra.app.decompiler import DecompInterface
     decomp_ifc = DecompInterface()
     decomp_ifc.openProgram(program)
@@ -119,15 +143,19 @@ def _analyze_program(flat_api, keyword: str) -> dict:
 
     try:
         for data in _iter_defined_strings(listing):
+            diagnostics["defined_strings"] += 1
             value_text = _safe_str(data.getValue())
             if keyword_lc not in value_text.lower():
                 continue
+            diagnostics["keyword_string_matches"] += 1
 
             refs_iter = reference_manager.getReferencesTo(data.getAddress())
             while refs_iter.hasNext():
                 ref = refs_iter.next()
+                diagnostics["references_to_keyword_strings"] += 1
                 from_func = function_manager.getFunctionContaining(ref.getFromAddress())
                 if from_func is None:
+                    diagnostics["references_outside_functions"] += 1
                     continue
                 func_record = _extract_function_record_with_fallback(program, from_func, decomp_ifc)
                 func_key = func_record.entry
@@ -145,19 +173,31 @@ def _analyze_program(flat_api, keyword: str) -> dict:
     return {
         "unique_functions_on_xrefs": [asdict(f) for f in sorted(unique_functions, key=lambda f: f.entry)],
         "candidate_functions_param_count_3": [asdict(f) for f in sorted(candidate_three_arg.values(), key=lambda f: f.entry)],
+        "diagnostics": diagnostics,
     }
 
 
 @contextlib.contextmanager
-def _suppress_java_output():
+def _java_output(verbose: bool):
+    if verbose:
+        yield lambda message: print(message, flush=True)
+        return
+
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     saved_out = os.dup(1)
     saved_err = os.dup(2)
     os.dup2(devnull_fd, 1)
     os.dup2(devnull_fd, 2)
     os.close(devnull_fd)
+
+    def write_status(message: str) -> None:
+        try:
+            os.write(saved_err, (message + "\n").encode("utf-8", errors="replace"))
+        except OSError:
+            pass
+
     try:
-        yield
+        yield write_status
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
@@ -165,6 +205,59 @@ def _suppress_java_output():
         os.dup2(saved_err, 2)
         os.close(saved_out)
         os.close(saved_err)
+
+
+@contextlib.contextmanager
+def _progress_heartbeat(write_status: Callable[[str], None], interval: int = 15):
+    stopped = threading.Event()
+    started = time.monotonic()
+
+    def heartbeat() -> None:
+        while not stopped.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            write_status(f"[*] Ghidra analysis still running ({elapsed}s elapsed) ...")
+
+    thread = threading.Thread(target=heartbeat, name="ghidra-progress", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join(timeout=1)
+
+
+def _package_version(name: str) -> str:
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return "not installed"
+
+
+def _binary_diagnostics(binary_path: Path, keyword: str) -> dict:
+    digest = hashlib.sha256()
+    raw_keyword_matches = 0
+    keyword_bytes = keyword.encode("utf-8")
+    overlap = b""
+    with binary_path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            searchable = overlap + chunk
+            raw_keyword_matches += searchable.lower().count(keyword_bytes.lower())
+            keep = max(len(keyword_bytes) - 1, 0)
+            overlap = searchable[-keep:] if keep else b""
+    return {
+        "path": str(binary_path),
+        "size": binary_path.stat().st_size,
+        "sha256": digest.hexdigest(),
+        "raw_keyword_matches": raw_keyword_matches,
+    }
+
+
+def _write_debug_report(path: Path, payload: dict) -> None:
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[+] Debug report: {path}")
 
 
 def _open_program_with_fallbacks(pyghidra_mod, binary_path: str, project_dir: str, project_name: str):
@@ -358,6 +451,15 @@ def main() -> int:
     parser.add_argument("output", nargs="?", default="flutter_ssl_pinning", help="Output base name (generates <name>.js and <name>.lua)")
     parser.add_argument("--module", default="libflutter.so", help="Module name in target process")
     parser.add_argument("--ghidra-install-dir", default=None, help="Ghidra installation directory")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show PyGhidra/Ghidra output and Python tracebacks")
+    parser.add_argument(
+        "--debug-report",
+        nargs="?",
+        const="flutter_ssl_pinning.debug.json",
+        metavar="PATH",
+        help="Write a portable JSON diagnostic report (default: flutter_ssl_pinning.debug.json)",
+    )
+    parser.add_argument("--keep-project", action="store_true", help="Keep the temporary Ghidra project for inspection")
     args = parser.parse_args()
 
     binary_path_obj = Path(args.binary).expanduser().resolve()
@@ -365,33 +467,72 @@ def main() -> int:
         sys.exit(f"[!] Binary not found: {binary_path_obj}")
 
     binary_path = str(binary_path_obj)
-    project_dir = str(Path("ghidra_projects").resolve())
-    os.makedirs(project_dir, exist_ok=True)
+    keyword = "ssl_client"
+    started = time.monotonic()
+    debug_payload = {
+        "environment": {
+            "os": platform.platform(),
+            "python": sys.version,
+            "pyghidra": _package_version("pyghidra"),
+            "jpype1": _package_version("jpype1"),
+            "ghidra_install_dir": args.ghidra_install_dir or os.environ.get("GHIDRA_INSTALL_DIR"),
+        },
+        "binary": _binary_diagnostics(binary_path_obj, keyword),
+        "analysis": {},
+    }
 
-    import pyghidra
+    project_parent = Path("ghidra_projects").resolve() if args.keep_project else None
+    if project_parent:
+        project_parent.mkdir(parents=True, exist_ok=True)
+    project_dir = tempfile.mkdtemp(prefix="flutter_ssl_recon_", dir=project_parent)
+
     warnings.filterwarnings("ignore", category=DeprecationWarning)
+    print(f"[*] Analyzing {binary_path_obj.name} ...", flush=True)
+    print("[*] First-time Ghidra analysis commonly takes 2-5 minutes.", flush=True)
 
-    print(f"[*] Analyzing {binary_path_obj.name} ...")
+    try:
+        import pyghidra
 
-    retry_project_name = None
-    with _suppress_java_output():
-        if args.ghidra_install_dir:
-            pyghidra.start(args.ghidra_install_dir)
+        with _java_output(args.verbose) as write_status:
+            write_status("[*] Starting PyGhidra ...")
+            start_options = {"verbose": args.verbose}
+            if args.ghidra_install_dir:
+                start_options["install_dir"] = Path(args.ghidra_install_dir).expanduser().resolve()
+            pyghidra.start(**start_options)
+            write_status("[*] PyGhidra started; importing and analyzing the ELF ...")
+
+            with _progress_heartbeat(write_status):
+                with _open_program_with_fallbacks(
+                    pyghidra, binary_path, project_dir, "flutter_ssl_recon"
+                ) as flat_api:
+                    report = _analyze_program(flat_api, keyword)
+
+            write_status(f"[*] Ghidra analysis completed in {time.monotonic() - started:.1f}s.")
+    except Exception as exc:
+        debug_payload["error"] = {
+            "type": type(exc).__name__,
+            "message": _safe_str(exc),
+            "traceback": traceback.format_exc(),
+        }
+        debug_payload["duration_seconds"] = round(time.monotonic() - started, 3)
+        if args.debug_report:
+            _write_debug_report(Path(args.debug_report), debug_payload)
+        print(f"[!] Analysis failed: {type(exc).__name__}: {_safe_str(exc)}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
         else:
-            pyghidra.start()
+            print("[!] Re-run with --verbose --debug-report and attach the log plus JSON report.", file=sys.stderr)
+        return 1
+    finally:
+        if args.keep_project:
+            print(f"[*] Kept Ghidra project: {project_dir}")
+        else:
+            shutil.rmtree(project_dir, ignore_errors=True)
 
-        try:
-            with _open_program_with_fallbacks(pyghidra, binary_path, project_dir, "flutter_ssl_recon") as flat_api:
-                report = _analyze_program(flat_api, "ssl_client")
-        except Exception as exc:
-            msg = _safe_str(exc)
-            if "Unable to lock project" not in msg:
-                raise
-            retry_project_name = f"flutter_ssl_recon_{int(time.time())}_{os.getpid()}"
-            with _open_program_with_fallbacks(pyghidra, binary_path, project_dir, retry_project_name) as flat_api:
-                report = _analyze_program(flat_api, "ssl_client")
-
-    shutil.rmtree(project_dir, ignore_errors=True)
+    debug_payload["analysis"] = report.get("diagnostics", {})
+    debug_payload["duration_seconds"] = round(time.monotonic() - started, 3)
+    if args.debug_report:
+        _write_debug_report(Path(args.debug_report), debug_payload)
 
     candidates = report.get("candidate_functions_param_count_3", [])
     if not candidates:
@@ -399,7 +540,20 @@ def main() -> int:
     candidates = [fn for fn in candidates if fn.get("rva")]
 
     if not candidates:
-        sys.exit("[!] No candidate functions found.")
+        diag = report.get("diagnostics", {})
+        print("[!] Candidate scan finished with zero results.", file=sys.stderr)
+        print(
+            "[!] Diagnostics: "
+            f"raw keyword={debug_payload['binary']['raw_keyword_matches']}, "
+            f"defined strings={diag.get('defined_strings', 0)}, "
+            f"keyword strings={diag.get('keyword_string_matches', 0)}, "
+            f"xrefs={diag.get('references_to_keyword_strings', 0)}, "
+            f"functions={diag.get('function_count', 0)}",
+            file=sys.stderr,
+        )
+        if not args.debug_report:
+            print("[!] Re-run with --verbose --debug-report and attach the log plus JSON report.", file=sys.stderr)
+        return 2
 
     print(f"[+] Found {len(candidates)} candidate(s):")
     for fn in candidates:

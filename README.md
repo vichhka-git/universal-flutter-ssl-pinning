@@ -41,6 +41,34 @@ renef -s com.example.app -l flutter_ssl_pinning.lua
 | `output` | `flutter_ssl_pinning` | Output base name (generates `<name>.js` and `<name>.lua`) |
 | `--module` | `libflutter.so` | Module name in target process |
 | `--ghidra-install-dir` | auto | Ghidra installation directory |
+| `-v`, `--verbose` | off | Show PyGhidra/Ghidra output and Python tracebacks |
+| `--debug-report [PATH]` | off | Write environment, binary hash, timing, and analysis counters to JSON |
+| `--keep-project` | off | Keep the unique temporary Ghidra project for manual inspection |
+
+## Troubleshooting
+
+Ghidra analysis is CPU-intensive and may take **2-5 minutes**, especially on the
+first run. The tool now prints a heartbeat every 15 seconds, so a long analysis
+does not look frozen.
+
+For a reproducible support bundle, run:
+
+```bash
+python3 flutter_ssl_pinning.py libflutter.so \
+  --verbose --debug-report debug.json > debug.log 2>&1
+```
+
+On Windows `cmd.exe`:
+
+```bat
+python flutter_ssl_pinning.py libflutter.so --ghidra-install-dir "G:\ghidra_12.0.4_PUBLIC" --verbose --debug-report debug.json > debug.log 2>&1
+```
+
+Attach `debug.log` and `debug.json` to the issue. The JSON report contains the
+OS/Python/PyGhidra/Ghidra versions, SHA-256 and size of the input, raw
+`ssl_client` matches, Ghidra-defined string matches, xref counts, function count,
+and total duration. This distinguishes installation/analysis failures from a
+Flutter binary whose expected anchor or xref shape has changed.
 
 ## Output files
 
